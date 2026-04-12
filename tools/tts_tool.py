@@ -33,6 +33,111 @@ import queue
 import re
 import shutil
 import subprocess
+
+
+# =========================================================================
+# TTS text preprocessing — make text sound natural when read aloud
+# =========================================================================
+
+# Emoji to spoken text mapping (common emojis that TTS engines can't handle)
+_EMOJI_MAP = {
+    "✅": "готово",
+    "❌": "ошибка",
+    "⬆️": "обновление",
+    "⚠️": "внимание",
+    "🔍": "",
+    "📊": "",
+    "💬": "",
+    "🔧": "",
+    "📦": "",
+    "🚀": "",
+    "🐱": "",
+    "👾": "",
+    "🎉": "",
+    "💡": "",
+    "📝": "",
+    "🔗": "",
+    "⚡": "",
+    "🔥": "",
+    "👍": "",
+    "👎": "",
+    "❤️": "",
+    "😍": "",
+    "🤖": "",
+    "💻": "",
+    "🛠": "",
+    "📈": "",
+    "📉": "",
+    "🔒": "",
+    "🔑": "",
+    "🎯": "",
+    "📌": "",
+    "🔊": "",
+    "👁️": "",
+    "🧠": "",
+    "📚": "",
+    "🎨": "",
+    "📨": "",
+    "⏰": "",
+    "🐍": "",
+    "🔀": "",
+    "🧪": "",
+}
+
+
+def _preprocess_tts_text(text: str) -> str:
+    """Normalize text for TTS so it sounds natural when read aloud.
+
+    - Strips markdown formatting (code blocks, bold, italic, links)
+    - Replaces common emojis with spoken equivalents
+    - Strips remaining emojis and special symbols
+    - Converts pseudo-graphics (box-drawing chars, table pipes) to pauses
+    - Collapses whitespace
+    """
+    # 1. Remove code block fences (```...```)
+    text = re.sub(r"```\w*\n?", "", text)
+    # 2. Remove inline code marks
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    # 3. Remove bold/italic markdown
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"\1", text)  # bold+italic
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # bold
+    text = re.sub(r"\*(.+?)\*", r"\1", text)  # italic
+    # 4. Convert markdown links [text](url) → text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # 5. Remove heading markers
+    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
+    # 6. Remove horizontal rules
+    text = re.sub(r"^---+$", "", text, flags=re.MULTILINE)
+    # 7. Replace known emojis with spoken text
+    for emoji, spoken in _EMOJI_MAP.items():
+        text = text.replace(emoji, f" {spoken} " if spoken else " ")
+    # 8. Remove remaining emojis (Unicode emoji ranges)
+    text = re.sub(
+        r"[\U0001F600-\U0001F64F"  # Emoticons
+        r"\U0001F300-\U0001F5FF"     # Symbols & Pictographs
+        r"\U0001F680-\U0001F6FF"     # Transport & Map
+        r"\U0001F1E0-\U0001F1FF"     # Flags
+        r"\U00002702-\U000027B0"     # Dingbats
+        r"\U0000FE00-\U0000FE0F"     # Variation Selectors
+        r"\U00002600-\U000026FF"     # Misc Symbols
+        r"\U0001F900-\U0001F9FF"     # Supplemental Symbols
+        r"\U0001FA00-\U0001FA6F"     # Chess, etc
+        r"\U0001FA70-\U0001FAFF"     # Symbols Extended-A
+        r"\U0000200D]"               # ZWJ
+        , " ", text)
+    # 9. Box-drawing chars and table pipes → comma/pause
+    text = re.sub(r"[┊┆│┃╎╏║┌┐└┘├┤┬┴┼─━┅┄]", ", ", text)
+    text = re.sub(r"^\|.*\|$", lambda m: m.group(0).replace("|", " "), text, flags=re.MULTILINE)
+    # 10. Replace media tags like MEDIA:/path → remove
+    text = re.sub(r"MEDIA:\S+", "", text)
+    # 11. Collapse multiple spaces/newlines
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n\n+", ". ", text)
+    text = text.strip()
+    # 12. Remove leading/trailing punctuation noise
+    text = re.sub(r"^\s*[,;:]\s*", "", text)
+    return text
 import tempfile
 import threading
 import uuid
@@ -526,12 +631,20 @@ def text_to_speech_tool(
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
 
+    # Load config early — needed for preprocess toggle
+    tts_config = _load_tts_config()
+
+    # Preprocess text for natural TTS output (strip markdown, emojis, etc.)
+    # Can be disabled via tts.preprocess: false in config
+    tts_preprocess = tts_config.get("preprocess", True)
+    if tts_preprocess:
+        text = _preprocess_tts_text(text)
+
     # Truncate very long text with a warning
     if len(text) > MAX_TEXT_LENGTH:
         logger.warning("TTS text too long (%d chars), truncating to %d", len(text), MAX_TEXT_LENGTH)
         text = text[:MAX_TEXT_LENGTH]
 
-    tts_config = _load_tts_config()
     provider = _get_provider(tts_config)
 
     # Detect platform from gateway env var to choose the best output format.
